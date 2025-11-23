@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  reindexer:
+    image: reindexer/reindexer:latest
+    container_name: reindexer
+    ports:
+      - "6534:6534"   # HTTP API
+      - "9088:9088"   # cproto binding
+      - "16534:16534" # gRPC binding
+    volumes:
+      - reindexer_data:/var/lib/reindexer
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 6534 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: involta-app
+    ports:
+      - "8080:8080"
+    environment:
+      # Server configuration
+      - APP_SERVER_HOST=0.0.0.0
+      - APP_SERVER_PORT=8080
+      
+      # Reindexer configuration
+      # Используем cproto протокол (требует CGO) - RPC/TCP порт 6534
+      - APP_REINDEXER_DSN=cproto://reindexer:6534/db
+      - APP_REINDEXER_NAMESPACE=default
+      - APP_REINDEXER_MAX_CONNECTIONS=10
+      
+      # Cache configuration
+      - APP_CACHE_SHARDS=16
+      - APP_CACHE_TTL=900
+      
+      # Concurrency configuration
+      - APP_CONCURRENCY_HTTP_MAX_WORKERS=100
+      - APP_CONCURRENCY_PROCESSOR_WORKERS=10
+      - APP_CONCURRENCY_CACHE_SHARDS=16
+      - APP_CONCURRENCY_DB_MAX_CONNECTIONS=10
+    depends_on:
+      reindexer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '1.0'
+          memory: 512M
+
+volumes:
+  reindexer_data:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge

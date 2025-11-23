@@ -1,6 +1,6 @@
 # Микросервис управления документами
 
-Микросервис для управления документами с вложенной структурой, построенный на принципах Clean Architecture. Реализован на языке Go с использованием встроенной базы данных Reindexer.
+Микросервис для управления документами с вложенной структурой, построенный на принципах Clean Architecture. Реализован на языке Go с использованием базы данных Reindexer в качестве отдельного сервиса.
 
 ## Содержание
 
@@ -32,7 +32,7 @@
 ## Технологический стек
 
 - **Go 1.21+** - Язык программирования
-- **Reindexer** - Встроенная база данных (cproto binding)
+- **Reindexer** - База данных (отдельный сервис, cproto binding)
 - **Docker & Docker Compose** - Контейнеризация
 - **Zap** - Структурированное логирование
 - **Viper** - Управление конфигурацией
@@ -85,18 +85,28 @@
 
 ### Использование Docker Compose (Рекомендуется)
 
+Docker Compose автоматически запускает два сервиса: Reindexer (база данных) и приложение. Приложение ожидает готовности Reindexer перед запуском.
+
 ```bash
-# Запуск всех сервисов
+# Запуск всех сервисов (Reindexer + приложение)
 docker-compose up -d
 
-# Просмотр логов
+# Просмотр логов приложения
 docker-compose logs -f app
 
-# Остановка сервисов
+# Просмотр логов Reindexer
+docker-compose logs -f reindexer
+
+# Просмотр логов всех сервисов
+docker-compose logs -f
+
+# Остановка всех сервисов
 docker-compose down
 ```
 
 ### Локальная разработка
+
+Для локальной разработки необходимо запустить Reindexer отдельно (через Docker или установить локально). По умолчанию приложение подключается к `cproto://localhost:6534/db`.
 
 ```bash
 # Установка зависимостей
@@ -109,7 +119,13 @@ go test ./...
 go build -o server ./cmd/server
 
 # Запуск приложения
+# Убедитесь, что Reindexer запущен на localhost:6534
 ./server
+```
+
+**Примечание:** Для локальной разработки можно запустить только Reindexer через Docker:
+```bash
+docker run -d -p 6534:6534 -p 9088:9088 --name reindexer reindexer/reindexer:latest
 ```
 
 ## Конфигурация
@@ -120,10 +136,15 @@ go build -o server ./cmd/server
 |------------|--------------|----------|
 | `APP_SERVER_HOST` | `0.0.0.0` | Хост сервера |
 | `APP_SERVER_PORT` | `8080` | Порт сервера |
-| `APP_REINDEXER_DSN` | `cproto://localhost:6534/db` | Строка подключения к Reindexer |
+| `APP_REINDEXER_DSN` | `cproto://localhost:6534/db` | Строка подключения к Reindexer (в Docker: `cproto://reindexer:6534/db`) |
 | `APP_REINDEXER_NAMESPACE` | `default` | Namespace Reindexer |
+| `APP_REINDEXER_MAX_CONNECTIONS` | `10` | Максимальное количество соединений с БД |
 | `APP_CACHE_TTL` | `900` | TTL кэша в секундах (15 минут) |
 | `APP_CACHE_SHARDS` | `16` | Количество шардов кэша |
+| `APP_CONCURRENCY_HTTP_MAX_WORKERS` | `100` | Максимум одновременных HTTP запросов |
+| `APP_CONCURRENCY_PROCESSOR_WORKERS` | `10` | Количество воркеров для фоновой обработки |
+| `APP_CONCURRENCY_CACHE_SHARDS` | `16` | Количество шардов кэша (дублирует APP_CACHE_SHARDS) |
+| `APP_CONCURRENCY_DB_MAX_CONNECTIONS` | `10` | Максимум соединений с БД (дублирует APP_REINDEXER_MAX_CONNECTIONS) |
 | `APP_CONFIG_PATH` | `config.yaml` | Путь к файлу конфигурации |
 
 ### Файл конфигурации
@@ -136,7 +157,7 @@ server:
   port: 8080
 
 reindexer:
-  dsn: "cproto://localhost:6534/db"
+  dsn: "cproto://localhost:6534/db"  # В Docker Compose используйте: cproto://reindexer:6534/db
   namespace: "default"
   max_connections: 10
 
@@ -150,6 +171,8 @@ concurrency:
   cache_shards: 16           # Количество шардов кэша
   db_max_connections: 10      # Максимум соединений с БД
 ```
+
+**Примечание:** При запуске через Docker Compose переменная `APP_REINDEXER_DSN` автоматически устанавливается в `cproto://reindexer:6534/db`, где `reindexer` - это имя сервиса в Docker Compose. Для локальной разработки используйте `cproto://localhost:6534/db`.
 
 ## API Документация
 
@@ -648,23 +671,40 @@ go test ./internal/usecases/...
 
 ## Docker
 
+Проект использует Docker Compose для оркестрации двух сервисов: базы данных Reindexer и приложения. Сервисы работают в одной Docker сети и взаимодействуют через внутренние DNS имена.
+
+### Архитектура сервисов
+
+Docker Compose запускает два независимых контейнера:
+
+1. **Reindexer** - отдельный контейнер с базой данных
+2. **Приложение** - контейнер с микросервисом, который подключается к Reindexer
+
+Приложение ожидает запуска Reindexer и проверяет его доступность через health check перед стартом.
+
 ### Сервисы
 
 #### Reindexer
 
 - **Образ:** `reindexer/reindexer:latest`
+- **Имя сервиса:** `reindexer` (используется для подключения из приложения)
 - **Порты:**
   - `6534` - HTTP API
-  - `9088` - cproto binding
+  - `9088` - cproto binding (RPC/TCP)
   - `16534` - gRPC binding
 - **Том:** `reindexer_data` для персистентности данных
+- **Health Check:** Проверка доступности порта 6534
+- **Ресурсы:** Ограничение CPU 1.0, память 512M
 
 #### Приложение
 
 - **Сборка:** Multi-stage Dockerfile
+- **Имя контейнера:** `involta-app`
 - **Порт:** `8080` - HTTP API
 - **Health Check:** `/health` endpoint
-- **Зависимости:** Требует запущенный и доступный сервис Reindexer
+- **Зависимости:** Запускается только после успешного health check сервиса Reindexer
+- **Подключение к БД:** Использует имя сервиса `reindexer` в DSN: `cproto://reindexer:6534/db`
+- **Ресурсы:** Ограничение CPU 2.0, память 1G
 
 ### Команды Docker Compose
 

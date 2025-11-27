@@ -488,16 +488,24 @@ func (r *ReindexerRepository) ListWithPagination(ctx context.Context, params dom
 
 	var docs []*domain.Document
 	for iter.Next() {
-		var doc domain.Document
-		if !iter.NextObj(&doc) {
-			r.logger.Error("ошибка чтения документа из итератора")
+		elem := iter.Object()
+		if elem == nil {
+			r.logger.Warn("итератор вернул nil документ, пропускаем")
+			continue
+		}
+
+		doc, ok := elem.(*domain.Document)
+		if !ok {
+			r.logger.Error("ошибка приведения типов при чтении списка",
+				zap.String("тип", fmt.Sprintf("%T", elem)),
+			)
 			continue
 		}
 
 		// ВАЖНО: Сортируем вложенные элементы для КАЖДОГО документа в списке.
-		r.sortLevel1Items(&doc)
+		r.sortLevel1Items(doc)
 
-		docs = append(docs, &doc)
+		docs = append(docs, doc)
 	}
 
 	hasMore := params.Offset+len(docs) < totalCount
